@@ -35,7 +35,7 @@ app.get('/prices', (req, res) => {
   res.json(stockPrices);
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ השרת פועל על פורט ${PORT}`);
