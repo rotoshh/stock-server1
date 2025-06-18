@@ -11,8 +11,9 @@ app.use(cors());
 console.log("🔧 השרת מתחיל לפעול עם המפתח:", API_KEY);
 
 let stockPrices = {};
-const symbols = ['AAPL', 'MSFT', 'GOOGL']; // תוכל לשנות לפי הצורך
+const symbols = ['AAPL', 'MSFT', 'GOOGL']; // תוכל להוסיף או לשנות
 
+// פונקציה לשליפת מחירים
 async function fetchStockPrices() {
   for (let symbol of symbols) {
     try {
@@ -28,16 +29,24 @@ async function fetchStockPrices() {
   }
 }
 
+// קריאה ראשונית וכל דקה
 setInterval(fetchStockPrices, 60 * 1000);
 fetchStockPrices();
 
+// נתיב בסיסי "/" שיחזיר הודעה פשוטה
+app.get('/', (req, res) => {
+  res.send('✅ השרת פעיל! היכנס לנתיב /prices כדי לראות מחירים.');
+});
+
+// נתיב "/prices" שמחזיר את כל המחירים
 app.get('/prices', (req, res) => {
   res.json(stockPrices);
 });
 
+// הפעלת השרת
 const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ השרת פועל על פורט ${PORT}`);
+app.listen(PORT, () => {
+  console.log(`🚀 השרת פועל על פורט ${PORT}`);
 });
+
 
