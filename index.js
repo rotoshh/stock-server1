@@ -35,6 +35,9 @@ app.get('/prices', (req, res) => {
   res.json(stockPrices);
 });
 
-app.listen(3000, () => {
-  console.log('✅ השרת פועל בכתובת http://localhost:3000/prices');
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ השרת פועל על פורט ${PORT}`);
 });
+
