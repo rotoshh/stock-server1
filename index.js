@@ -25,13 +25,31 @@ app.post('/update-portfolio', (req, res) => {
   res.json({ message: 'התיק נשמר בהצלחה' });
 });
 
-// שליפת מחירים בזמן אמת לפי משתמש
 app.get('/prices/:userId', (req, res) => {
   const { userId } = req.params;
-  if (!userPrices[userId]) {
-    return res.status(404).json({ error: 'לא נמצאו מחירים עבור המשתמש' });
+
+  const portfolio = userPortfolios[userId];
+  const prices = userPrices[userId];
+
+  if (!portfolio || !prices) {
+    return res.status(404).json({ error: 'לא נמצא תיק או מחירים עבור המשתמש' });
   }
-  res.json(userPrices[userId]);
+
+  const detailed = {};
+
+  for (const [symbol, data] of Object.entries(portfolio.stocks)) {
+    detailed[symbol] = {
+      currentPrice: prices[symbol]?.price || null,
+      lastUpdate: prices[symbol]?.time || null,
+      stopLoss: data.stopLoss,
+      sold: data.sold || false
+    };
+  }
+
+  res.json({
+    userId,
+    stocks: detailed
+  });
 });
 
 // בדיקת מחירים וביצוע מכירה במידת הצורך
