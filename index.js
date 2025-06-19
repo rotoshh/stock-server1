@@ -5,72 +5,68 @@ const cors = require('cors');
 
 const app = express();
 app.use(cors());
-app.use(express.json()); // כדי לאפשר קבלת JSON בבקשות POST
+app.use(express.json());
 
-const API_KEY = process.env.API_KEY;
+const userPortfolios = {}; // שמירת תיקים לפי userId
 
-console.log("🔧 השרת פועל עם מפתח API:", API_KEY);
+// נקודת קבלה לתיק מהאתר
+app.post('/update-portfolio', (req, res) => {
+  const { userId, apiKey, stocks, sellApiUrl } = req.body;
 
-// רשימת מניות למעקב
-const symbols = ['AAPL', 'MSFT', 'GOOGL'];
-let stockPrices = {}; // מחירים עדכניים
-let stopLosses = {};  // מחירי סטופ לוס
-
-// שליחת מחירים עדכניים מהשרת
-app.get('/prices', (req, res) => {
-  res.json(stockPrices);
-});
-
-// קבלת מחיר סטופ לוס מהאתר
-app.post('/set-stop-loss', (req, res) => {
-  const { symbol, stopLoss } = req.body;
-
-  if (!symbol || !stopLoss) {
-    return res.status(400).json({ error: 'חובה לשלוח גם symbol וגם stopLoss' });
+  if (!userId || !apiKey || !stocks || !sellApiUrl) {
+    return res.status(400).json({ error: 'Missing userId, apiKey, stocks or sellApiUrl' });
   }
 
-  stopLosses[symbol.toUpperCase()] = parseFloat(stopLoss);
-  console.log(`📉 נקבע סטופ לוס ל-${symbol.toUpperCase()}: $${stopLoss}`);
-  res.json({ message: `הסטופ-לוס עבור ${symbol.toUpperCase()} נשמר בהצלחה.` });
+  userPortfolios[userId] = { apiKey, stocks, sellApiUrl };
+  console.log(`📦 עודכן תיק עבור ${userId}`);
+  res.json({ message: 'Portfolio updated' });
 });
 
-// פונקציה שמביאה מחירי מניות מה-API כל דקה
-async function fetchStockPrices() {
-  for (let symbol of symbols) {
-    try {
-      const res = await axios.get(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
-      const currentPrice = res.data.c;
+// פונקציית בדיקה ומכירה אוטומטית
+async function checkStopLosses() {
+  for (const [userId, portfolio] of Object.entries(userPortfolios)) {
+    const { apiKey, stocks, sellApiUrl } = portfolio;
 
-      stockPrices[symbol] = {
-        price: currentPrice,
-        time: new Date()
-      };
+    for (const [symbol, data] of Object.entries(stocks)) {
+      try {
+        const res = await axios.get(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${apiKey}`);
+        const currentPrice = res.data.c;
 
-      console.log(`✅ ${symbol}: $${currentPrice}`);
+        console.log(`🔍 ${userId} - ${symbol}: $${currentPrice} | Stop: ${data.stopLoss}`);
 
-      // בדיקת סטופ לוס
-      const stopLoss = stopLosses[symbol];
-      if (stopLoss && currentPrice <= stopLoss) {
-        console.log(`🚨 ${symbol} הגיע לסטופ לוס! מחיר: $${currentPrice} <= $${stopLoss}`);
-        
-        // כאן ניתן לבצע פעולה אמיתית (אם בעתיד תשלב API של ברוקר)
-        delete stopLosses[symbol]; // מסיר את הסטופ-לוס לאחר "מכירה"
+        if (currentPrice <= data.stopLoss && !data.sold) {
+          console.log(`🚨 מכירה אוטומטית ${symbol} למשתמש ${userId} במחיר ${currentPrice}`);
+
+          // שליחת מכירה ל-API של האתר שלך
+          try {
+            await axios.post(sellApiUrl, {
+              userId,
+              symbol,
+              price: currentPrice,
+              time: new Date()
+            });
+            data.sold = true; // סימון כמכורה
+            console.log(`✅ נשלחה בקשת מכירה ל-API עבור ${symbol}`);
+          } catch (err) {
+            console.error(`❌ שגיאה בשליחת בקשת מכירה ל-API:`, err.message);
+          }
+        }
+      } catch (err) {
+        console.error(`❌ שגיאה בקבלת מחיר ${symbol} עבור ${userId}:`, err.message);
       }
-
-    } catch (error) {
-      console.error(`❌ שגיאה במחיר של ${symbol}:`, error.message);
     }
   }
 }
 
-// עדכון מחירים כל דקה
-setInterval(fetchStockPrices, 60 * 1000);
-fetchStockPrices();
+// בדיקה כל 60 שניות
+setInterval(checkStopLosses, 60 * 1000);
 
-// הרצת השרת
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`✅ השרת פועל על פורט ${PORT} - כתובת: http://localhost:${PORT}/prices`);
+// דף ראשי
+app.get('/', (req, res) => {
+  res.send('✅ השרת פועל. שלח תיק לכתובת /update-portfolio');
 });
 
-
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 השרת פועל על פורט ${PORT}`);
+});
