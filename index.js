@@ -15,6 +15,10 @@ const userPrices = {};      // { userId: { symbol: { price, time } } }
 app.post('/update-portfolio', (req, res) => {
   const { userId, apiKey, stocks, sellApiUrl } = req.body;
 
+    // ✅ שורת בדיקה כדי לראות שהמפתח באמת מגיע
+  console.log("🔐 apiKey שהתקבל מהאתר:", apiKey);
+  console.log("📬 נתונים מלאים שהתקבלו:", req.body);
+
   if (!userId || !apiKey || !stocks || !sellApiUrl) {
     return res.status(400).json({ error: 'חסרים userId, apiKey, stocks או sellApiUrl' });
   }
