@@ -7,76 +7,71 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// זיכרון זמני - תיקים של משתמשים
-const userPortfolios = {};  // { userId: { apiKey, sellApiUrl, stocks: { symbol: { stopLoss, sold } } } }
+const userPortfolios = {};  // { userId: { alpacaKeys, stocks: { symbol: { stopLoss, sold } }, sellApiUrl } }
 const userPrices = {};      // { userId: { symbol: { price, time } } }
 
-// קבלת תיק מהאתר (עדכון או יצירת חדש)
+// קבלת תיק ועדכון API של Alpaca
 app.post('/update-portfolio', (req, res) => {
-  const { userId, apiKey, stocks, sellApiUrl } = req.body;
+  const { userId, stocks, sellApiUrl, alpacaKeys } = req.body;
 
-    // ✅ שורת בדיקה כדי לראות שהמפתח באמת מגיע
-  console.log("🔐 apiKey שהתקבל מהאתר:", apiKey);
-  console.log("📬 נתונים מלאים שהתקבלו:", req.body);
-
-  if (!userId || !apiKey || !stocks || !sellApiUrl) {
-    return res.status(400).json({ error: 'חסרים userId, apiKey, stocks או sellApiUrl' });
+  if (!userId || !stocks || !sellApiUrl || !alpacaKeys || !alpacaKeys.key || !alpacaKeys.secret) {
+    return res.status(400).json({ error: 'חסרים userId, stocks, sellApiUrl או alpacaKeys' });
   }
 
-  userPortfolios[userId] = { apiKey, stocks, sellApiUrl };
-  console.log(`📦 התקבל תיק חדש או עודכן עבור ${userId}`);
-
-  res.json({ message: 'התיק נשמר בהצלחה' });
+  userPortfolios[userId] = { stocks, sellApiUrl, alpacaKeys };
+  console.log(`📦 תיק עודכן עבור ${userId}`);
+  res.json({ message: 'תיק נשמר בהצלחה' });
 });
 
+// שליחת מחירים בזמן אמת לפי משתמש
 app.get('/prices/:userId', (req, res) => {
   const { userId } = req.params;
-
   const portfolio = userPortfolios[userId];
   const prices = userPrices[userId];
 
   if (!portfolio || !prices) {
-    return res.status(404).json({ error: 'לא נמצא תיק או מחירים עבור המשתמש' });
+    return res.status(404).json({ error: 'לא נמצאו מחירים או תיק למשתמש' });
   }
 
-  const detailed = {};
-
+  const response = {};
   for (const [symbol, data] of Object.entries(portfolio.stocks)) {
-    detailed[symbol] = {
+    response[symbol] = {
       currentPrice: prices[symbol]?.price || null,
       lastUpdate: prices[symbol]?.time || null,
       stopLoss: data.stopLoss,
       sold: data.sold || false
     };
   }
-
-  res.json({
-    userId,
-    stocks: detailed
-  });
+  res.json({ userId, stocks: response });
 });
 
-// בדיקת מחירים וביצוע מכירה במידת הצורך
+// שליפת מחירים מ-Alpaca ובדיקת סטופ-לוס
 async function checkAndUpdatePrices() {
   for (const [userId, portfolio] of Object.entries(userPortfolios)) {
-    const { apiKey, stocks, sellApiUrl } = portfolio;
-
+    const { stocks, alpacaKeys, sellApiUrl } = portfolio;
     if (!userPrices[userId]) userPrices[userId] = {};
 
     for (const [symbol, data] of Object.entries(stocks)) {
       try {
-        const response = await axios.get(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${apiKey}`);
-        const currentPrice = response.data.c;
+        const response = await axios.get(
+          `https://data.alpaca.markets/v2/stocks/${symbol}/quotes/latest`,
+          {
+            headers: {
+              'APCA-API-KEY-ID': alpacaKeys.key,
+              'APCA-API-SECRET-KEY': alpacaKeys.secret
+            }
+          }
+        );
+
+        const currentPrice = response.data.quote.ap;
         const timestamp = new Date();
 
-        // שמירת מחיר עדכני לזיכרון
         userPrices[userId][symbol] = { price: currentPrice, time: timestamp };
 
         console.log(`📈 ${userId} - ${symbol}: $${currentPrice} (סטופ: ${data.stopLoss})`);
 
-        // בדיקה האם המחיר ירד מתחת לסטופ לוס
         if (currentPrice <= data.stopLoss && !data.sold) {
-          console.log(`🚨 ${symbol} ירד לסטופ-לוס עבור ${userId} - שולח פקודת מכירה`);
+          console.log(`🚨 ${symbol} הגיע לסטופ-לוס עבור ${userId}`);
 
           try {
             await axios.post(sellApiUrl, {
@@ -85,32 +80,27 @@ async function checkAndUpdatePrices() {
               price: currentPrice,
               time: timestamp
             });
-
             data.sold = true;
-            console.log(`✅ נשלחה פקודת מכירה ל-${sellApiUrl} עבור ${symbol}`);
-          } catch (err) {
-            console.error(`❌ שגיאה בשליחת מכירה ל-${sellApiUrl}:`, err.message);
+            console.log(`✅ פקודת מכירה נשלחה עבור ${symbol}`);
+          } catch (error) {
+            console.error(`❌ שגיאה בשליחת מכירה ל-${sellApiUrl}:`, error.message);
           }
         }
-
-      } catch (err) {
-        console.error(`❌ שגיאה בשליפת ${symbol} עבור ${userId}:`, err.message);
+      } catch (error) {
+        console.error(`❌ שגיאה בשליפת ${symbol} עבור ${userId}:`, error.message);
       }
     }
   }
 }
 
-// הפעלת בדיקה כל דקה
 setInterval(checkAndUpdatePrices, 60 * 1000);
 checkAndUpdatePrices();
 
-// שורש פשוט לבדיקת חיים
 app.get('/', (req, res) => {
-  res.send('✅ השרת פועל! שלח תיקים לכתובת /update-portfolio');
+  res.send('✅ השרת פעיל ומשתמש ב-Alpaca למחירים בזמן אמת');
 });
 
-// הרצת השרת
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 השרת מאזין על פורט ${PORT}`);
+  console.log(`🚀 מאזין על פורט ${PORT}`);
 });
