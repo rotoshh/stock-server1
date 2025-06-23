@@ -98,6 +98,10 @@ async function checkAndUpdatePrices() {
     if (!userPrices[userId]) userPrices[userId] = {};
 
     for (const [symbol, data] of Object.entries(stocks)) {
+  if (data.sold) {
+    continue; // דלג על מניות שנמכרו
+  }
+
       const price = await getAlpacaPrice(symbol, alpacaKeys.key, alpacaKeys.secret);
       const time = new Date();
 
