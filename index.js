@@ -11,6 +11,13 @@ app.use(express.json());
 const userPortfolios = {};  // { userId: { alpacaKeys: { key, secret }, stocks: { symbol: { stopLoss, quantity, sold } } } }
 const userPrices = {};      // { userId: { symbol: { price, time } } }
 
+const BASE44_API_KEY = process.env.BASE44_API_KEY;
+const BASE44_RISK_API = 'https://riskwise-app.base44.com/api/recalculate-risk';
+
+if (!BASE44_API_KEY) {
+  console.warn('⚠️ לא הוגדר BASE44_API_KEY בקובץ .env – לא תתבצע שליחת חישובי סיכון.');
+}
+
 // קבלת תיק מהאתר
 app.post('/update-portfolio', (req, res) => {
   const { userId, alpacaKeys, stocks } = req.body;
@@ -84,7 +91,7 @@ async function getAlpacaPrice(symbol, alpacaKey, alpacaSecret) {
       }
     });
 
-    return res.data.quote.ap; // ask price
+    return res.data.quote?.ap || null; // ask price
   } catch (err) {
     console.error(`❌ שגיאה בשליפת מחיר מ-Alpaca עבור ${symbol}:`, err.message);
     return null;
@@ -98,9 +105,7 @@ async function checkAndUpdatePrices() {
     if (!userPrices[userId]) userPrices[userId] = {};
 
     for (const [symbol, data] of Object.entries(stocks)) {
-  if (data.sold) {
-    continue; // דלג על מניות שנמכרו
-  }
+      if (data.sold) continue; // דלג על מניות שנמכרו
 
       const price = await getAlpacaPrice(symbol, alpacaKeys.key, alpacaKeys.secret);
       const time = new Date();
@@ -120,14 +125,70 @@ async function checkAndUpdatePrices() {
   }
 }
 
-setInterval(checkAndUpdatePrices, 60 * 1000);
+// חישוב רמת סיכון מחדש לפי שינויים מהותיים
+async function checkRiskTriggers() {
+  if (!BASE44_API_KEY) return;
+
+  for (const [userId, portfolio] of Object.entries(userPortfolios)) {
+    const { alpacaKeys, stocks } = portfolio;
+    const userPrevPrices = userPrices[userId] || {};
+
+    for (const [symbol, data] of Object.entries(stocks)) {
+      if (data.sold) continue;
+
+      const newPrice = await getAlpacaPrice(symbol, alpacaKeys.key, alpacaKeys.secret);
+      const time = new Date();
+
+      if (!newPrice) continue;
+
+      const previous = userPrevPrices[symbol];
+      if (!previous) {
+        userPrices[userId][symbol] = { price: newPrice, time };
+        continue;
+      }
+
+      const oldPrice = previous.price;
+      const changePercent = ((newPrice - oldPrice) / oldPrice) * 100;
+
+      userPrices[userId][symbol] = { price: newPrice, time };
+
+      if (Math.abs(changePercent) >= 5) {
+        console.log(`⚠️ שינוי חד במחיר ${symbol} (${changePercent.toFixed(2)}%) עבור ${userId}. שולח חישוב סיכון חדש...`);
+
+        try {
+          await axios.post(BASE44_RISK_API, {
+            userId,
+            symbol,
+            reason: `Price changed by ${changePercent.toFixed(2)}%`,
+            currentPrice: newPrice
+          }, {
+            headers: {
+              'Authorization': `Bearer ${BASE44_API_KEY}`,
+              'Content-Type': 'application/json'
+            }
+          });
+
+          console.log(`✅ נשלחה בקשת חישוב סיכון מחודש עבור ${symbol} של ${userId}`);
+        } catch (err) {
+          console.error(`❌ שגיאה בשליחת בקשת חישוב סיכון ל-${symbol}:`, err.message);
+        }
+      }
+    }
+  }
+}
+
+// לולאות הפעלה קבועות
+setInterval(checkAndUpdatePrices, 60 * 1000);      // כל דקה
+setInterval(checkRiskTriggers, 30 * 60 * 1000);    // כל 30 דקות
 checkAndUpdatePrices();
+checkRiskTriggers();
 
 // בדיקת חיים
 app.get('/', (req, res) => {
-  res.send('✅ השרת פועל עם Alpaca בלבד!');
+  res.send('✅ השרת פועל עם Alpaca ו־Base44!');
 });
 
+// הרצת השרת
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 השרת מאזין על פורט ${PORT}`);
