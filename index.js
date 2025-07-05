@@ -7,28 +7,44 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const userPortfolios = {};  // { userId: { alpacaKeys?, stocks: { symbol: { stopLoss, quantity, sold } } } }
+// תיקים של משתמשים בזיכרון
+const userPortfolios = {};  // { userId: { alpacaKeys: { key, secret }, stocks: { symbol: { stopLoss, quantity, sold } } } }
 const userPrices = {};      // { userId: { symbol: { price, time } } }
-const userNotifications = new Map(); // התראות לכל משתמש
-
-const BASE44_API_KEY = process.env.BASE44_API_KEY;
-const BASE44_RISK_API = 'https://riskwise-app.base44.com/api/recalculate-risk';
-
-// ============================
-// פונקציות תפעול עיקריות
-// ============================
 
 // קבלת תיק מהאתר
 app.post('/update-portfolio', (req, res) => {
-  const { userId, stocks, alpacaKeys } = req.body;
+  const { userId, alpacaKeys, stocks } = req.body;
 
-  if (!userId || !stocks) {
-    return res.status(400).json({ error: 'חסר userId או stocks' });
+  if (!userId || !alpacaKeys?.key || !alpacaKeys?.secret || !stocks) {
+    return res.status(400).json({ error: 'חסרים שדות חובה: userId, alpacaKeys, stocks' });
   }
 
-  userPortfolios[userId] = { stocks, alpacaKeys };
-  console.log(`📦 תיק עודכן עבור ${userId}`);
+  userPortfolios[userId] = { alpacaKeys, stocks };
+  console.log(📦 תיק עודכן עבור ${userId});
   res.json({ message: 'התיק נשמר בהצלחה' });
+});
+
+// שליפת מחירים לפי משתמש
+app.get('/prices/:userId', (req, res) => {
+  const { userId } = req.params;
+  const portfolio = userPortfolios[userId];
+  const prices = userPrices[userId];
+
+  if (!portfolio || !prices) {
+    return res.status(404).json({ error: 'לא נמצא תיק או מחירים עבור המשתמש' });
+  }
+
+  const detailed = {};
+  for (const [symbol, data] of Object.entries(portfolio.stocks)) {
+    detailed[symbol] = {
+      currentPrice: prices[symbol]?.price || null,
+      lastUpdate: prices[symbol]?.time || null,
+      stopLoss: data.stopLoss,
+      sold: data.sold || false
+    };
+  }
+
+  res.json({ userId, stocks: detailed });
 });
 
 // שליחת פקודת מכירה ל-Alpaca
@@ -50,82 +66,53 @@ async function sellWithAlpaca(userId, symbol, quantity, alpacaKey, alpacaSecret)
         'APCA-API-SECRET-KEY': alpacaSecret
       }
     });
-    console.log(`✅ פקודת מכירה נשלחה עבור ${symbol} (${quantity}) של ${userId}`);
+    console.log(✅ פקודת מכירה נשלחה עבור ${symbol} (${quantity}) של ${userId});
   } catch (err) {
-    console.error(`❌ שגיאה בשליחת מכירה ל-Alpaca עבור ${symbol}:`, err.message);
+    console.error(❌ שגיאה בשליחת מכירה ל-Alpaca עבור ${symbol}:, err.message);
   }
 }
 
-// שליפת מחיר לפי Alpaca או Finnhub
-async function getPriceForSymbol(symbol, alpacaKeys) {
-  if (alpacaKeys) {
-    try {
-      const res = await axios.get(`https://data.alpaca.markets/v2/stocks/${symbol}/quotes/latest`, {
-        headers: {
-          'APCA-API-KEY-ID': alpacaKeys.key,
-          'APCA-API-SECRET-KEY': alpacaKeys.secret
-        }
-      });
-      return res.data.quote?.ap || null;
-    } catch (err) {
-      console.error(`❌ שגיאה בשליפת מחיר מ-Alpaca עבור ${symbol}:`, err.message);
-      return null;
-    }
-  } else {
-    const token = process.env.FINNHUB_API_KEY;
-    if (!token) return null;
-    try {
-      const res = await axios.get(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${token}`);
-      return res.data.c || null;
-    } catch (err) {
-      console.error(`❌ שגיאה בשליפת מחיר מ-Finnhub עבור ${symbol}:`, err.message);
-      return null;
-    }
+// שליפת מחיר מממשק Alpaca
+async function getAlpacaPrice(symbol, alpacaKey, alpacaSecret) {
+  const url = https://data.alpaca.markets/v2/stocks/${symbol}/quotes/latest;
+
+  try {
+    const res = await axios.get(url, {
+      headers: {
+        'APCA-API-KEY-ID': alpacaKey,
+        'APCA-API-SECRET-KEY': alpacaSecret
+      }
+    });
+
+    return res.data.quote.ap; // ask price
+  } catch (err) {
+    console.error(❌ שגיאה בשליפת מחיר מ-Alpaca עבור ${symbol}:, err.message);
+    return null;
   }
 }
 
-// הוספת התראה על סטופ לוס
-function onStopLossTriggered(userId, symbol, price, stopLoss) {
-  if (!userNotifications.has(userId)) {
-    userNotifications.set(userId, []);
-  }
-
-  const notification = {
-    id: Date.now() + Math.random(),
-    type: 'stop_loss',
-    message: `מניית ${symbol} הגיעה ל-Stop Loss! מחיר: $${price}, Stop Loss: $${stopLoss}`,
-    timestamp: new Date().toISOString(),
-    stockTicker: symbol,
-    price,
-    stopLossPrice: stopLoss,
-    read: false
-  };
-
-  userNotifications.get(userId).push(notification);
-  console.log(`🚨 התראה נוספה למשתמש ${userId}:`, notification.message);
-}
-
-// בדיקת סטופ לוס לכל המשתמשים
+// בדיקת מחירים ומכירה לפי סטופ-לוס
 async function checkAndUpdatePrices() {
-  for (const [userId, { stocks, alpacaKeys }] of Object.entries(userPortfolios)) {
+  for (const [userId, portfolio] of Object.entries(userPortfolios)) {
+    const { alpacaKeys, stocks } = portfolio;
     if (!userPrices[userId]) userPrices[userId] = {};
 
     for (const [symbol, data] of Object.entries(stocks)) {
-      if (data.sold) continue;
+  if (data.sold) {
+    continue; // דלג על מניות שנמכרו
+  }
 
-      const price = await getPriceForSymbol(symbol, alpacaKeys);
+      const price = await getAlpacaPrice(symbol, alpacaKeys.key, alpacaKeys.secret);
       const time = new Date();
 
       if (price !== null) {
         userPrices[userId][symbol] = { price, time };
-        console.log(`📈 ${userId} - ${symbol}: $${price} (סטופ: ${data.stopLoss})`);
 
-        if (price <= data.stopLoss) {
-          if (alpacaKeys) {
-            await sellWithAlpaca(userId, symbol, data.quantity || 1, alpacaKeys.key, alpacaKeys.secret);
-          } else {
-            onStopLossTriggered(userId, symbol, price, data.stopLoss);
-          }
+        console.log(📈 ${userId} - ${symbol}: $${price} (סטופ: ${data.stopLoss}));
+
+        if (price <= data.stopLoss && !data.sold) {
+          console.log(🚨 ${symbol} הגיע לסטופ לוס עבור ${userId}, מבצע מכירה...);
+          await sellWithAlpaca(userId, symbol, data.quantity || 1, alpacaKeys.key, alpacaKeys.secret);
           data.sold = true;
         }
       }
@@ -133,102 +120,66 @@ async function checkAndUpdatePrices() {
   }
 }
 
-// חישוב סיכון מחדש לפי שינוי מחירים
-async function checkRiskTriggers() {
-  if (!BASE44_API_KEY) return;
+setInterval(checkAndUpdatePrices, 60 * 1000);
+checkAndUpdatePrices();
 
-  for (const [userId, { stocks, alpacaKeys }] of Object.entries(userPortfolios)) {
-    const previous = userPrices[userId] || {};
+// בדיקת חיים
+app.get('/', (req, res) => {
+  res.send('✅ השרת פועל עם Alpaca בלבד!');
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(🚀 השרת מאזין על פורט ${PORT});
+});
+
+const BASE44_API_KEY = process.env.BASE44_API_KEY;
+const BASE44_RISK_API = 'https://riskwise-app.base44.com/api/recalculate-risk';
+
+// בדיקת שינויים שדורשים חישוב רמת סיכון מחדש
+async function checkRiskTriggers() {
+  for (const [userId, portfolio] of Object.entries(userPortfolios)) {
+    const { alpacaKeys, stocks } = portfolio;
+    const userPrevPrices = userPrices[userId] || {};
 
     for (const [symbol, data] of Object.entries(stocks)) {
-      if (data.sold) continue;
-
-      const newPrice = await getPriceForSymbol(symbol, alpacaKeys);
+      const newPrice = await getAlpacaPrice(symbol, alpacaKeys.key, alpacaKeys.secret);
       const time = new Date();
+
       if (!newPrice) continue;
 
-      const oldPrice = previous[symbol]?.price || newPrice;
-      const changePercent = ((newPrice - oldPrice) / oldPrice) * 100;
+      const oldPrice = userPrevPrices[symbol]?.price || newPrice;
       userPrices[userId][symbol] = { price: newPrice, time };
 
+      const changePercent = ((newPrice - oldPrice) / oldPrice) * 100;
+
       if (Math.abs(changePercent) >= 5) {
+        console.log(⚠ שינוי חד במחיר ${symbol} (${changePercent.toFixed(2)}%) עבור ${userId}. שולח חישוב סיכון חדש...);
+
         try {
           await axios.post(BASE44_RISK_API, {
             userId,
             symbol,
-            reason: `Price changed by ${changePercent.toFixed(2)}%`,
+            reason: Price changed by ${changePercent.toFixed(2)}%,
             currentPrice: newPrice
           }, {
             headers: {
-              Authorization: `Bearer ${BASE44_API_KEY}`,
+              'Authorization': Bearer ${BASE44_API_KEY},
               'Content-Type': 'application/json'
             }
           });
-          console.log(`✅ חישוב סיכון נשלח עבור ${symbol} של ${userId}`);
+
+          console.log(✅ נשלחה בקשת חישוב סיכון מחודש עבור ${symbol} של ${userId});
         } catch (err) {
-          console.error(`❌ שגיאה בשליחת חישוב סיכון ל-${symbol}:`, err.message);
+          console.error(❌ שגיאה בשליחת בקשת חישוב סיכון ל-${symbol}:, err.message);
         }
       }
     }
   }
 }
-
-// ============================
-// API להתראות
-// ============================
-
-app.get('/notifications/:userId', (req, res) => {
-  const userId = req.params.userId;
-  const notifications = userNotifications.get(userId) || [];
-  res.json({ notifications: notifications.filter(n => !n.read) });
-});
-
-app.post('/notifications/:userId/:notificationId/read', (req, res) => {
-  const { userId, notificationId } = req.params;
-  const notifications = userNotifications.get(userId) || [];
-  const note = notifications.find(n => n.id == notificationId);
-  if (note) note.read = true;
-  res.json({ success: true });
-});
-
-// שליפת מחירים לפי משתמש
-app.get('/prices/:userId', (req, res) => {
-  const { userId } = req.params;
-  const portfolio = userPortfolios[userId];
-  const prices = userPrices[userId];
-
-  if (!portfolio || !prices) {
-    return res.status(404).json({ error: 'לא נמצא תיק או מחירים עבור המשתמש' });
-  }
-
-  const result = {};
-  for (const [symbol, data] of Object.entries(portfolio.stocks)) {
-    result[symbol] = {
-      currentPrice: prices[symbol]?.price || null,
-      lastUpdate: prices[symbol]?.time || null,
-      stopLoss: data.stopLoss,
-      sold: data.sold || false
-    };
-  }
-
-  res.json({ userId, stocks: result });
-});
-
-// בדיקת חיים
-app.get('/', (req, res) => {
-  res.send('✅ השרת פועל עם Alpaca, Finnhub ו־Base44!');
-});
-
-// ============================
-// לולאות זמן
-// ============================
-
-setInterval(checkAndUpdatePrices, 60 * 1000);
 setInterval(checkRiskTriggers, 30 * 60 * 1000);
-checkAndUpdatePrices();
-checkRiskTriggers();
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 השרת מאזין על פורט ${PORT}`);
-});
+checkRiskTriggers(); // ריצה מיידית בהתחלה
+if (!BASE44_API_KEY) {
+  console.warn('⚠ לא הוגדר BASE44_API_KEY בקובץ .env – לא תתבצע שליחת חישובי סיכון.');
+  return;
+}
