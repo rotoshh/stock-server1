@@ -8,7 +8,7 @@ app.use(cors());
 app.use(express.json());
 
 const userPortfolios = {};  // { userId: { alpacaKeys?, stocks: { symbol: { stopLoss, quantity, sold } } } }
-const userPrices = {};      // { userId: { symbol: { price, time } } }
+const userPrices = {};      // { userId: { symbol: { price, openPrice, previousClose, time } } }
 const userNotifications = new Map();
 
 const BASE44_API_KEY = process.env.BASE44_API_KEY;
@@ -49,6 +49,120 @@ async function getPriceForSymbol(symbol, alpacaKeys) {
     } catch (err) {
       console.error(`❌ שגיאה בשליפת מחיר מ-Finnhub עבור ${symbol}:`, err.message);
       return null;
+    }
+  }
+}
+
+async function getQuoteForSymbol(symbol, alpacaKeys) {
+  try {
+    if (alpacaKeys) {
+      const { data: quoteData } = await axios.get(`https://data.alpaca.markets/v2/stocks/${symbol}/quotes/latest`, {
+        headers: {
+          'APCA-API-KEY-ID': alpacaKeys.key,
+          'APCA-API-SECRET-KEY': alpacaKeys.secret
+        }
+      });
+      const { data: barsData } = await axios.get(`https://data.alpaca.markets/v2/stocks/${symbol}/bars?timeframe=1Day&limit=2`, {
+        headers: {
+          'APCA-API-KEY-ID': alpacaKeys.key,
+          'APCA-API-SECRET-KEY': alpacaKeys.secret
+        }
+      });
+      const todayBar = barsData.bars[1];
+      const yesterdayBar = barsData.bars[0];
+      return {
+        latestPrice: quoteData.quote.ap,
+        open: todayBar.o,
+        previousClose: yesterdayBar.c
+      };
+    } else {
+      const token = process.env.FINNHUB_API_KEY;
+      const [quoteRes, candleRes] = await Promise.all([
+        axios.get(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${token}`),
+        axios.get(`https://finnhub.io/api/v1/stock/candle?symbol=${symbol}&resolution=D&count=2&token=${token}`)
+      ]);
+      const candleData = candleRes.data;
+      return {
+        latestPrice: quoteRes.data.c,
+        open: candleData.o[1],
+        previousClose: candleData.c[0]
+      };
+    }
+  } catch (err) {
+    console.error(`❌ שגיאה בשליפת quote ל-${symbol}:`, err.message);
+    return null;
+  }
+}
+
+function isSameDay(d1, d2) {
+  return d1.getFullYear() === d2.getFullYear() &&
+         d1.getMonth() === d2.getMonth() &&
+         d1.getDate() === d2.getDate();
+}
+
+async function sendRiskUpdate(userId, symbol, reason, currentPrice) {
+  try {
+    await axios.post(BASE44_RISK_API, {
+      userId,
+      symbol,
+      reason,
+      currentPrice
+    }, {
+      headers: {
+        Authorization: `Bearer ${BASE44_API_KEY}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    console.log(`📊 חישוב סיכון נשלח עבור ${symbol} של ${userId} (${reason})`);
+  } catch (err) {
+    console.error(`❌ שגיאה בשליחת חישוב סיכון ל-${symbol}:`, err.message);
+  }
+}
+
+async function checkVolatilityTriggers() {
+  if (!BASE44_API_KEY) return;
+
+  for (const [userId, { stocks, alpacaKeys }] of Object.entries(userPortfolios)) {
+    const previous = userPrices[userId] || {};
+    userPrices[userId] = previous;
+
+    for (const [symbol, data] of Object.entries(stocks)) {
+      if (data.sold) continue;
+
+      const quote = await getQuoteForSymbol(symbol, alpacaKeys);
+      if (!quote || !quote.latestPrice) continue;
+
+      const now = new Date();
+      const oldData = previous[symbol] || {};
+      const oldPrice = oldData.price || quote.latestPrice;
+
+      if (!oldData.openPrice || !oldData.previousClose || !isSameDay(now, new Date(oldData.time))) {
+        previous[symbol] = {
+          price: quote.latestPrice,
+          openPrice: quote.open,
+          previousClose: quote.previousClose,
+          time: now
+        };
+        continue;
+      }
+
+      const dailyChange = ((quote.latestPrice - oldData.openPrice) / oldData.openPrice) * 100;
+      const gapChange = ((oldData.openPrice - oldData.previousClose) / oldData.previousClose) * 100;
+
+      previous[symbol] = {
+        price: quote.latestPrice,
+        openPrice: oldData.openPrice,
+        previousClose: oldData.previousClose,
+        time: now
+      };
+
+      if (Math.abs(dailyChange) >= 5) {
+        await sendRiskUpdate(userId, symbol, `Intraday price changed by ${dailyChange.toFixed(2)}%`, quote.latestPrice);
+      }
+
+      if (Math.abs(gapChange) >= 5) {
+        await sendRiskUpdate(userId, symbol, `Open vs previous close gap: ${gapChange.toFixed(2)}%`, quote.latestPrice);
+      }
     }
   }
 }
@@ -110,7 +224,7 @@ async function checkAndUpdatePrices() {
       const time = new Date();
 
       if (price !== null) {
-        userPrices[userId][symbol] = { price, time };
+        userPrices[userId][symbol] = { ...(userPrices[userId][symbol] || {}), price, time };
         console.log(`📈 ${userId} - ${symbol}: $${price} (סטופ: ${data.stopLoss})`);
 
         if (price <= data.stopLoss) {
@@ -143,25 +257,10 @@ async function checkRiskTriggers() {
 
       const oldPrice = previous[symbol]?.price || newPrice;
       const changePercent = ((newPrice - oldPrice) / oldPrice) * 100;
-      userPrices[userId][symbol] = { price: newPrice, time };
+      userPrices[userId][symbol] = { ...(userPrices[userId][symbol] || {}), price: newPrice, time };
 
       if (Math.abs(changePercent) >= 5) {
-        try {
-          await axios.post(BASE44_RISK_API, {
-            userId,
-            symbol,
-            reason: `Price changed by ${changePercent.toFixed(2)}%`,
-            currentPrice: newPrice
-          }, {
-            headers: {
-              Authorization: `Bearer ${BASE44_API_KEY}`,
-              'Content-Type': 'application/json'
-            }
-          });
-          console.log(`✅ חישוב סיכון נשלח עבור ${symbol} של ${userId}`);
-        } catch (err) {
-          console.error(`❌ שגיאה בשליחת חישוב סיכון ל-${symbol}:`, err.message);
-        }
+        await sendRiskUpdate(userId, symbol, `Price changed by ${changePercent.toFixed(2)}%`, newPrice);
       }
     }
   }
@@ -210,10 +309,13 @@ app.get('/', (req, res) => {
 
 setInterval(checkAndUpdatePrices, 60 * 1000);
 setInterval(checkRiskTriggers, 30 * 60 * 1000);
+setInterval(checkVolatilityTriggers, 15 * 60 * 1000);
 checkAndUpdatePrices();
 checkRiskTriggers();
+checkVolatilityTriggers();
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 השרת מאזין על פורט ${PORT}`);
 });
+
