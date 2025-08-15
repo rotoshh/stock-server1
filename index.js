@@ -6,8 +6,31 @@ const axios = require('axios');
 const cors = require('cors');
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+
+// ---- CORS + JSON SAFE ----
+const allowedOrigins = [
+  'https://app.base44.com/apps/684c3006b888b466396ab87e/editor/preview/Dashboard',   // החלף בדומיין של האתר ב-VibeCoding
+  'http://localhost:3000',          // לפיתוח מקומי (אם צריך)
+];
+
+app.use(cors({
+  origin: (origin, cb) => {
+    // לאפשר גם Postman/שרתים ללא Origin
+    if (!origin) return cb(null, true);
+    if (allowedOrigins.includes(origin)) return cb(null, true);
+    // לא לאפשר דומיינים לא מוכרים (אפשר להקל אם צריך)
+    return cb(new Error('Not allowed by CORS: ' + origin));
+  },
+  methods: ['GET','POST','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization'],
+  credentials: true
+}));
+
+// לאפשר Preflight לכל הנתיבים
+app.options('*', cors());
+
+// להגדיל את מגבלת גוף ה-JSON (למקרה של תיקים גדולים)
+app.use(express.json({ limit: '1mb' }));
 
 const userPortfolios = {};
 const userPrices = {};
